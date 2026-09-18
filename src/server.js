@@ -1,5 +1,6 @@
 import express from 'express';
 import { publishToYouTube } from './youtube.js';
+import { isSupabaseConfigured } from './supabase.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -16,6 +17,8 @@ app.get('/health', (_req, res) => {
     service: 'codigomystery-backend',
     n8n_configured: Boolean(n8nActionWebhookUrl),
     youtube_configured: Boolean(process.env.YOUTUBE_CLIENT_ID && process.env.YOUTUBE_CLIENT_SECRET && process.env.YOUTUBE_REFRESH_TOKEN),
+    supabase_configured: isSupabaseConfigured,
+    database_configured: Boolean(process.env.DATABASE_URL),
     timestamp: new Date().toISOString(),
   });
 });
