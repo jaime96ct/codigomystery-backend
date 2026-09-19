@@ -604,6 +604,89 @@ app.post('/projects/:projectId/discard', async (req, res) => {
   }
 });
 
+
+app.post(
+  '/projects/:projectId/music',
+  express.raw({
+    type: ['audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/aac', 'audio/ogg'],
+    limit: '30mb',
+  }),
+  async (req, res) => {
+    try {
+      const supabase = requireSupabase();
+      const mimeType = req.get('content-type') || '';
+      const extensionMap = {
+        'audio/mpeg': 'mp3',
+        'audio/wav': 'wav',
+        'audio/x-wav': 'wav',
+        'audio/mp4': 'm4a',
+        'audio/aac': 'aac',
+        'audio/ogg': 'ogg',
+      };
+      const extension = extensionMap[mimeType];
+
+      if (!extension || !Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ ok: false, error: 'invalid_music_upload' });
+      }
+
+      const { error: projectReadError } = await supabase
+        .from('projects')
+        .select('project_id')
+        .eq('project_id', req.params.projectId)
+        .single();
+      if (projectReadError) {
+        if (projectReadError.code === 'PGRST116') {
+          return res.status(404).json({ ok: false, error: 'project_not_found' });
+        }
+        throw projectReadError;
+      }
+
+      const storagePath = `${req.params.projectId}/music/music.${extension}`;
+      const { error: uploadError } = await supabase.storage
+        .from('projects')
+        .upload(storagePath, req.body, {
+          contentType: mimeType,
+          upsert: true,
+          cacheControl: '3600',
+        });
+      if (uploadError) throw uploadError;
+
+      await supabase
+        .from('assets')
+        .delete()
+        .eq('project_id', req.params.projectId)
+        .eq('type', 'music_final');
+
+      const { error: assetError } = await supabase
+        .from('assets')
+        .insert({
+          project_id: req.params.projectId,
+          type: 'music_final',
+          provider: req.get('x-music-provider') || 'manual_upload',
+          url: storagePath,
+          metadata: {
+            mime_type: mimeType,
+            bytes: req.body.length,
+            target_mix_volume: 0.12,
+          },
+        });
+      if (assetError) throw assetError;
+
+      return res.status(201).json({
+        ok: true,
+        project_id: req.params.projectId,
+        music_url: storagePath,
+      });
+    } catch (error) {
+      return res.status(500).json({
+        ok: false,
+        error: error.code || 'music_upload_failed',
+        message: error.message,
+      });
+    }
+  },
+);
+
 function parseCallbackData(body) {
   const callbackData = body?.callback_query?.data ?? body?.callback_data ?? body?.data;
   if (typeof callbackData !== 'string' || !callbackData.trim()) {
