@@ -9,12 +9,13 @@
     "dev": "node --watch src/server.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
     "express": "^5.1.0",
     "googleapis": "^144.0.0",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "ffmpeg-static": "^5.2.0"
   }
 }
