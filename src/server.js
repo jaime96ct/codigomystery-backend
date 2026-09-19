@@ -3,6 +3,7 @@ import { publishToYouTube } from './youtube.js';
 import { isSupabaseConfigured, requireSupabase } from './supabase.js';
 import { generateProjectImages, signProjectImageUrls, materializeScheduledImages } from './workers/assets.js';
 import { generateProjectTimeline } from './workers/timeline.js';
+import { renderProjectVideo } from './workers/render.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -409,6 +410,14 @@ app.post(
         .eq('project_id', req.params.projectId);
       if (statusError) throw statusError;
 
+      if (imagesReady) {
+        setTimeout(() => {
+          void renderProjectVideo(req.params.projectId).catch((renderError) => {
+            console.error('[render-worker] project failed:', renderError.message);
+          });
+        }, 0);
+      }
+
       const { data: signed, error: signedError } = await supabase.storage
         .from('projects')
         .createSignedUrl(storagePath, 3600);
@@ -429,6 +438,27 @@ app.post(
     }
   },
 );
+
+
+app.post('/projects/:projectId/render', async (req, res) => {
+  try {
+    const result = await renderProjectVideo(req.params.projectId);
+    return res.json(result);
+  } catch (error) {
+    const statusMap = {
+      project_has_no_scenes: 400,
+      images_not_ready: 409,
+      voice_not_ready: 409,
+      ffmpeg_unavailable: 503,
+    };
+    return res.status(statusMap[error.code] || 500).json({
+      ok: false,
+      error: error.code || 'render_failed',
+      message: error.message,
+      pending_scene_ids: error.pending_scene_ids ?? null,
+    });
+  }
+});
 
 function parseCallbackData(body) {
   const callbackData = body?.callback_query?.data ?? body?.callback_data ?? body?.data;
