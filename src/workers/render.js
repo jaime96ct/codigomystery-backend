@@ -227,7 +227,7 @@ function buildFfmpegArgs({
     if (input.type === 'video') {
       args.push('-stream_loop', '-1', '-i', input.path);
     } else {
-      args.push('-loop', '1', '-t', String(duration), '-i', input.path);
+      args.push('-loop', '1', '-framerate', '30', '-t', String(duration), '-i', input.path);
     }
   });
 
@@ -276,8 +276,8 @@ function buildFfmpegArgs({
     '-map', videoLabel,
     '-map', audioMap,
     '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    '-crf', '21',
+    '-preset', 'ultrafast',
+    '-crf', '20',
     '-pix_fmt', 'yuv420p',
     '-c:a', 'aac',
     '-b:a', '192k',
