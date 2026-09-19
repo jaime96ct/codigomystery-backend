@@ -173,6 +173,146 @@ app.post('/projects/:projectId/generate-svg-preview', async (req, res) => {
   }
 });
 
+
+app.post(
+  '/projects/:projectId/scenes/:sceneId/image',
+  express.raw({ type: ['image/png', 'image/jpeg', 'image/webp'], limit: '12mb' }),
+  async (req, res) => {
+    try {
+      const supabase = requireSupabase();
+      const mimeType = req.get('content-type') || '';
+      const extensionMap = {
+        'image/png': 'png',
+        'image/jpeg': 'jpg',
+        'image/webp': 'webp',
+      };
+      const extension = extensionMap[mimeType];
+
+      if (!extension || !Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ ok: false, error: 'invalid_image_upload' });
+      }
+
+      const { data: scene, error: sceneReadError } = await supabase
+        .from('scenes')
+        .select('id,project_id,scene_number,image_url')
+        .eq('id', req.params.sceneId)
+        .eq('project_id', req.params.projectId)
+        .single();
+
+      if (sceneReadError) {
+        if (sceneReadError.code === 'PGRST116') {
+          return res.status(404).json({ ok: false, error: 'scene_not_found' });
+        }
+        throw sceneReadError;
+      }
+
+      const storagePath = `${req.params.projectId}/scenes/${scene.scene_number}/image.${extension}`;
+      const { error: uploadError } = await supabase.storage
+        .from('projects')
+        .upload(storagePath, req.body, {
+          contentType: mimeType,
+          upsert: true,
+          cacheControl: '3600',
+        });
+      if (uploadError) throw uploadError;
+
+      if (scene.image_url && scene.image_url !== storagePath) {
+        await supabase.storage.from('projects').remove([scene.image_url]).catch(() => {});
+      }
+
+      const provider = req.get('x-image-provider') || 'manual_upload';
+      const { error: sceneUpdateError } = await supabase
+        .from('scenes')
+        .update({
+          image_url: storagePath,
+          status: 'IMAGE_READY',
+          image_provider: provider,
+          image_generation_notes: req.get('x-image-notes') || null,
+        })
+        .eq('id', scene.id);
+      if (sceneUpdateError) throw sceneUpdateError;
+
+      await supabase
+        .from('assets')
+        .delete()
+        .eq('scene_id', scene.id)
+        .eq('type', 'image_final');
+
+      const { error: assetError } = await supabase
+        .from('assets')
+        .insert({
+          project_id: req.params.projectId,
+          scene_id: scene.id,
+          type: 'image_final',
+          provider,
+          url: storagePath,
+          metadata: {
+            mime_type: mimeType,
+            bytes: req.body.length,
+            aspect_ratio: '9:16',
+            character_model: 'codigomystery_stickman_v1',
+          },
+        });
+      if (assetError) throw assetError;
+
+      const { data: signed, error: signedError } = await supabase.storage
+        .from('projects')
+        .createSignedUrl(storagePath, 3600);
+
+      return res.status(201).json({
+        ok: true,
+        scene_id: scene.id,
+        image_url: storagePath,
+        image_preview_url: signedError ? null : signed?.signedUrl ?? null,
+      });
+    } catch (error) {
+      return res.status(500).json({
+        ok: false,
+        error: error.code || 'image_upload_failed',
+        message: error.message,
+      });
+    }
+  },
+);
+
+app.post('/projects/:projectId/approve-images', async (req, res) => {
+  try {
+    const supabase = requireSupabase();
+    const { data: scenes, error } = await supabase
+      .from('scenes')
+      .select('id,status,image_url')
+      .eq('project_id', req.params.projectId);
+
+    if (error) throw error;
+    if (!scenes?.length) {
+      return res.status(400).json({ ok: false, error: 'project_has_no_scenes' });
+    }
+
+    const pending = scenes.filter((scene) => scene.status !== 'IMAGE_READY' || !scene.image_url);
+    if (pending.length) {
+      return res.status(409).json({
+        ok: false,
+        error: 'images_not_ready',
+        pending_scene_ids: pending.map((scene) => scene.id),
+      });
+    }
+
+    const { error: projectError } = await supabase
+      .from('projects')
+      .update({ status: 'READY_FOR_VOICE', error_message: null })
+      .eq('project_id', req.params.projectId);
+    if (projectError) throw projectError;
+
+    return res.json({ ok: true, status: 'READY_FOR_VOICE' });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.code || 'image_approval_failed',
+      message: error.message,
+    });
+  }
+});
+
 function parseCallbackData(body) {
   const callbackData = body?.callback_query?.data ?? body?.callback_data ?? body?.data;
   if (typeof callbackData !== 'string' || !callbackData.trim()) {
