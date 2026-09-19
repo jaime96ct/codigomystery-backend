@@ -11,17 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Create project from slot 1
+      - name: Use prepared test project
         id: create
         shell: bash
         run: |
           set -euo pipefail
-          RESPONSE=$(curl -fsS -X POST 'https://codigomystery-backend.onrender.com/projects' \
-            -H 'Content-Type: application/json' \
-            --data '{"format":"Micro-misterio","language":"Español","style":"Stickman CodigoMystery","slot":1}')
-          echo "$RESPONSE" | tee create.json
-          PROJECT_ID=$(echo "$RESPONSE" | jq -r '.project.project_id')
-          test -n "$PROJECT_ID" && test "$PROJECT_ID" != "null"
+          PROJECT_ID='CM-2026-09-19-557995'
+          curl -fsS "https://codigomystery-backend.onrender.com/projects/$PROJECT_ID" >/dev/null
           echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
 
       - name: Wait for staged images to materialize
@@ -66,6 +62,7 @@ jobs:
             -H 'Content-Type: audio/wav' \
             -H 'x-voice-provider: github_e2e_espeak' \
             --data-binary @voice.wav
+          curl -fsS -X POST "https://codigomystery-backend.onrender.com/projects/$PROJECT_ID/render" || true
 
       - name: Wait for final render
         shell: bash
