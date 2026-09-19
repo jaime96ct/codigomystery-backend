@@ -119,12 +119,6 @@ app.post('/projects', async (req, res) => {
       });
     }
 
-    setTimeout(() => {
-      void generateProjectImages(projectId).catch((assetError) => {
-        console.error('[assets-worker] project failed:', assetError.message);
-      });
-    }, 0);
-
     return res.status(201).json({ ok: true, project: data });
   } catch (error) {
     return res.status(error.code === 'supabase_not_configured' ? 503 : 500).json({
@@ -162,18 +156,18 @@ app.get('/projects/:projectId', async (req, res) => {
   }
 });
 
-app.post('/projects/:projectId/generate-images', async (req, res) => {
-  if (backendActionSecret && req.get('x-codigomystery-secret') !== backendActionSecret) {
+app.post('/projects/:projectId/generate-svg-preview', async (req, res) => {
+  if (!backendActionSecret || req.get('x-codigomystery-secret') !== backendActionSecret) {
     return res.status(401).json({ ok: false, error: 'unauthorized' });
   }
 
   try {
     const result = await generateProjectImages(req.params.projectId);
-    return res.json(result);
+    return res.json({ ...result, preview_only: true });
   } catch (error) {
     return res.status(500).json({
       ok: false,
-      error: error.code || 'image_generation_failed',
+      error: error.code || 'svg_preview_generation_failed',
       message: error.message,
     });
   }
