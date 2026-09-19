@@ -746,6 +746,8 @@ app.post('/projects/:projectId/render', async (req, res) => {
     const statusMap = {
       project_has_no_scenes: 400,
       images_not_ready: 409,
+      animation_selection_pending: 409,
+      animations_not_ready: 409,
       voice_not_ready: 409,
       ffmpeg_unavailable: 503,
     };
