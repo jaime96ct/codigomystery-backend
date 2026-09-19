@@ -49,6 +49,37 @@ const scriptSchema = {
   additionalProperties: false,
 };
 
+const scenesSchema = {
+  type: 'object',
+  properties: {
+    scenes: {
+      type: 'array',
+      minItems: 4,
+      maxItems: 8,
+      items: {
+        type: 'object',
+        properties: {
+          scene_number: { type: 'integer', minimum: 1, maximum: 8 },
+          narration: { type: 'string' },
+          duration: { type: 'number', minimum: 1, maximum: 10 },
+          image_prompt: { type: 'string' },
+          animation_prompt: { type: 'string' },
+        },
+        required: [
+          'scene_number',
+          'narration',
+          'duration',
+          'image_prompt',
+          'animation_prompt',
+        ],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['scenes'],
+  additionalProperties: false,
+};
+
 const qaSchema = {
   type: 'object',
   properties: {
@@ -230,6 +261,69 @@ ${qaFeedback.length ? `Fix these QA problems from the previous attempt:\n- ${qaF
   }
 }
 
+async function generateScenes(projectId, idea, script) {
+  const job = await createJob(projectId, 'GENERATE_SCENES', 1);
+
+  try {
+    await updateProject(projectId, { status: 'GENERATING_SCENES' });
+
+    const result = await createStructuredResponse({
+      name: 'codigomystery_scenes',
+      schema: scenesSchema,
+      instructions: `${CODIGOMYSTERY_EDITORIAL_RULES}
+
+Scene planning rules:
+- Each scene is a separate vertical 9:16 visual.
+- Never create collages, grids, storyboards, split screens, or multiple scenes in one image.
+- Keep one visual focus per scene.
+- Preserve the same main stickman character design across scenes.
+- Image prompts must describe only one image.
+- Animation prompts should request subtle motion suitable for a Short.
+- Narration across scenes must preserve the spoken script order and meaning.`,
+      input: `Split this approved CodigoMystery script into 4-8 production scenes.
+
+IDEA:
+${JSON.stringify(idea, null, 2)}
+
+SCRIPT:
+${JSON.stringify(script, null, 2)}
+
+Create a practical scene plan for later image, animation, voice, subtitle, and render stages.`,
+    });
+
+    const supabase = requireSupabase();
+    const rows = result.scenes
+      .sort((a, b) => a.scene_number - b.scene_number)
+      .map((scene, index) => ({
+        project_id: projectId,
+        scene_number: index + 1,
+        narration: scene.narration,
+        duration: scene.duration,
+        image_prompt: scene.image_prompt,
+        animation_prompt: scene.animation_prompt,
+        status: 'PLANNED',
+      }));
+
+    const { error: deleteError } = await supabase
+      .from('scenes')
+      .delete()
+      .eq('project_id', projectId);
+    if (deleteError) throw deleteError;
+
+    const { error: insertError } = await supabase
+      .from('scenes')
+      .insert(rows);
+    if (insertError) throw insertError;
+
+    await updateProject(projectId, { status: 'READY_FOR_ASSETS' });
+    await finishJob(job.id, 'COMPLETED');
+    return rows;
+  } catch (error) {
+    await finishJob(job.id, 'ERROR', 0, error.message).catch(() => {});
+    throw error;
+  }
+}
+
 async function runScriptQa(projectId, idea, script, attempt, recent) {
   const job = await createJob(projectId, 'SCRIPT_QA', attempt);
 
@@ -283,7 +377,14 @@ export async function processProject(projectId) {
       const qa = await runScriptQa(projectId, idea, script, attempt, recent);
 
       if (qa.passed) {
-        return { ok: true, status: 'READY_FOR_SCENES', attempt };
+        await updateProject(projectId, { status: 'READY_FOR_SCENES' });
+        const scenes = await generateScenes(projectId, idea, script);
+        return {
+          ok: true,
+          status: 'READY_FOR_ASSETS',
+          attempt,
+          scenes: scenes.length,
+        };
       }
 
       qaFeedback = qa.revision_instructions?.length
