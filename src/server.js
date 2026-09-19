@@ -2,6 +2,7 @@ import express from 'express';
 import { publishToYouTube } from './youtube.js';
 import { isSupabaseConfigured, requireSupabase } from './supabase.js';
 import { generateProjectImages, signProjectImageUrls, materializeScheduledImages } from './workers/assets.js';
+import { generateProjectTimeline } from './workers/timeline.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -120,6 +121,9 @@ app.post('/projects', async (req, res) => {
     }
 
     setTimeout(() => {
+      void generateProjectTimeline(projectId).catch((timelineError) => {
+        console.error('[timeline-worker] generation failed:', timelineError.message);
+      });
       void materializeScheduledImages(projectId).catch((assetError) => {
         console.error('[scheduled-images] materialization failed:', assetError.message);
       });
