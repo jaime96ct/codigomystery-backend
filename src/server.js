@@ -1,7 +1,7 @@
 import express from 'express';
 import { publishToYouTube } from './youtube.js';
 import { isSupabaseConfigured, requireSupabase } from './supabase.js';
-import { generateProjectImages, signProjectImageUrls } from './workers/assets.js';
+import { generateProjectImages, signProjectImageUrls, materializeScheduledImages } from './workers/assets.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -118,6 +118,12 @@ app.post('/projects', async (req, res) => {
         message: 'No hay contenido preparado disponible para hoy.',
       });
     }
+
+    setTimeout(() => {
+      void materializeScheduledImages(projectId).catch((assetError) => {
+        console.error('[scheduled-images] materialization failed:', assetError.message);
+      });
+    }, 0);
 
     return res.status(201).json({ ok: true, project: data });
   } catch (error) {
