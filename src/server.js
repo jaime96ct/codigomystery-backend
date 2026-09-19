@@ -1,6 +1,7 @@
 import express from 'express';
 import { publishToYouTube } from './youtube.js';
 import { isSupabaseConfigured, requireSupabase } from './supabase.js';
+import { generateProjectImages, signProjectImageUrls } from './workers/assets.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -118,6 +119,12 @@ app.post('/projects', async (req, res) => {
       });
     }
 
+    setTimeout(() => {
+      void generateProjectImages(projectId).catch((assetError) => {
+        console.error('[assets-worker] project failed:', assetError.message);
+      });
+    }, 0);
+
     return res.status(201).json({ ok: true, project: data });
   } catch (error) {
     return res.status(error.code === 'supabase_not_configured' ? 503 : 500).json({
@@ -144,11 +151,29 @@ app.get('/projects/:projectId', async (req, res) => {
       throw error;
     }
 
-    return res.json({ ok: true, project: data });
+    const project = await signProjectImageUrls(data);
+    return res.json({ ok: true, project });
   } catch (error) {
     return res.status(error.code === 'supabase_not_configured' ? 503 : 500).json({
       ok: false,
       error: error.code || 'project_read_failed',
+      message: error.message,
+    });
+  }
+});
+
+app.post('/projects/:projectId/generate-images', async (req, res) => {
+  if (backendActionSecret && req.get('x-codigomystery-secret') !== backendActionSecret) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+
+  try {
+    const result = await generateProjectImages(req.params.projectId);
+    return res.json(result);
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.code || 'image_generation_failed',
       message: error.message,
     });
   }
