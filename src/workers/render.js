@@ -337,6 +337,12 @@ export async function renderProjectVideo(projectId) {
 
   if (projectError) throw projectError;
 
+  if (project.status === 'RENDERING') {
+    const error = new Error('A render is already in progress for this project');
+    error.code = 'render_already_in_progress';
+    throw error;
+  }
+
   const rawScenes = (project.scenes ?? [])
     .slice()
     .sort((a, b) => a.scene_number - b.scene_number);
