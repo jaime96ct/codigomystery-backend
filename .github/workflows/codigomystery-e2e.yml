@@ -62,7 +62,6 @@ jobs:
             -H 'Content-Type: audio/wav' \
             -H 'x-voice-provider: github_e2e_espeak' \
             --data-binary @voice.wav
-          curl -fsS -X POST "https://codigomystery-backend.onrender.com/projects/$PROJECT_ID/render" || true
 
       - name: Wait for final render
         shell: bash
