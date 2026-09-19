@@ -765,6 +765,7 @@ app.post('/projects/:projectId/render', async (req, res) => {
       animations_not_ready: 409,
       voice_not_ready: 409,
       ffmpeg_unavailable: 503,
+      render_already_in_progress: 409,
     };
     return res.status(statusMap[error.code] || 500).json({
       ok: false,
