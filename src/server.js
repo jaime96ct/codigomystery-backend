@@ -334,11 +334,15 @@ app.post('/projects/:projectId/approve-images', async (req, res) => {
 
     const { error: projectError } = await supabase
       .from('projects')
-      .update({ status: 'READY_FOR_VOICE', error_message: null })
+      .update({
+        status: 'READY_FOR_ANIMATION_SELECTION',
+        animation_selection_confirmed: false,
+        error_message: null,
+      })
       .eq('project_id', req.params.projectId);
     if (projectError) throw projectError;
 
-    return res.json({ ok: true, status: 'READY_FOR_VOICE' });
+    return res.json({ ok: true, status: 'READY_FOR_ANIMATION_SELECTION' });
   } catch (error) {
     return res.status(500).json({
       ok: false,
@@ -347,6 +351,254 @@ app.post('/projects/:projectId/approve-images', async (req, res) => {
     });
   }
 });
+
+
+app.post('/projects/:projectId/animation-selection', async (req, res) => {
+  try {
+    const supabase = requireSupabase();
+    const sceneIds = Array.isArray(req.body?.scene_ids)
+      ? [...new Set(req.body.scene_ids.filter((value) => typeof value === 'string'))]
+      : [];
+
+    if (sceneIds.length > 2) {
+      return res.status(400).json({
+        ok: false,
+        error: 'max_two_animations',
+        message: 'Solo se pueden seleccionar como máximo 2 escenas para Google Flow.',
+      });
+    }
+
+    const { data: scenes, error: scenesError } = await supabase
+      .from('scenes')
+      .select('id,scene_number,image_url,status,animation_prompt,flow_prompt')
+      .eq('project_id', req.params.projectId)
+      .order('scene_number', { ascending: true });
+    if (scenesError) throw scenesError;
+    if (!scenes?.length) {
+      return res.status(400).json({ ok: false, error: 'project_has_no_scenes' });
+    }
+
+    const knownIds = new Set(scenes.map((scene) => scene.id));
+    const unknown = sceneIds.filter((id) => !knownIds.has(id));
+    if (unknown.length) {
+      return res.status(400).json({ ok: false, error: 'invalid_scene_ids', scene_ids: unknown });
+    }
+
+    const notReady = scenes.filter(
+      (scene) => sceneIds.includes(scene.id) && (!scene.image_url || scene.status !== 'IMAGE_READY'),
+    );
+    if (notReady.length) {
+      return res.status(409).json({
+        ok: false,
+        error: 'selected_images_not_ready',
+        pending_scene_ids: notReady.map((scene) => scene.id),
+      });
+    }
+
+    const prioritized = sceneIds
+      .map((id, index) => ({ id, priority: index + 1 }));
+
+    for (const scene of scenes) {
+      const chosen = prioritized.find((item) => item.id === scene.id);
+      const flowPrompt = scene.flow_prompt || [
+        scene.animation_prompt || '',
+        'Animate this exact CodigoMystery stickman scene in vertical 9:16.',
+        'Preserve the original character design, composition and simple 2D style.',
+        'Do not add text, new characters, new clothing or redesign the scene.',
+        'Use controlled motion only.',
+      ].filter(Boolean).join(' ');
+
+      const { error } = await supabase
+        .from('scenes')
+        .update({
+          animate_with_flow: Boolean(chosen),
+          animation_priority: chosen ? chosen.priority : null,
+          flow_prompt: flowPrompt,
+          animation_status: chosen
+            ? (scene.animation_url ? 'ANIMATION_READY' : 'WAITING_UPLOAD')
+            : 'NOT_SELECTED',
+          animation_provider: chosen && scene.animation_url ? 'google_flow_manual' : null,
+        })
+        .eq('id', scene.id);
+      if (error) throw error;
+    }
+
+    const selectedScenes = scenes.filter((scene) => sceneIds.includes(scene.id));
+    const allSelectedAlreadyUploaded = selectedScenes.every((scene) => Boolean(scene.animation_url));
+    const nextStatus = sceneIds.length === 0 || allSelectedAlreadyUploaded
+      ? 'READY_FOR_VOICE'
+      : 'WAITING_FOR_ANIMATIONS';
+
+    const { error: projectError } = await supabase
+      .from('projects')
+      .update({
+        animation_selection_confirmed: true,
+        status: nextStatus,
+        error_message: null,
+      })
+      .eq('project_id', req.params.projectId);
+    if (projectError) throw projectError;
+
+    return res.json({
+      ok: true,
+      selected_scene_ids: sceneIds,
+      selected_count: sceneIds.length,
+      max_animations: 2,
+      status: nextStatus,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.code || 'animation_selection_failed',
+      message: error.message,
+    });
+  }
+});
+
+app.post(
+  '/projects/:projectId/scenes/:sceneId/animation',
+  express.raw({
+    type: ['video/mp4', 'video/webm', 'video/quicktime'],
+    limit: '80mb',
+  }),
+  async (req, res) => {
+    try {
+      const supabase = requireSupabase();
+      const mimeType = req.get('content-type') || '';
+      const extensionMap = {
+        'video/mp4': 'mp4',
+        'video/webm': 'webm',
+        'video/quicktime': 'mov',
+      };
+      const extension = extensionMap[mimeType];
+
+      if (!extension || !Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ ok: false, error: 'invalid_animation_upload' });
+      }
+
+      const { data: scene, error: sceneError } = await supabase
+        .from('scenes')
+        .select('id,project_id,scene_number,animate_with_flow,animation_url')
+        .eq('id', req.params.sceneId)
+        .eq('project_id', req.params.projectId)
+        .single();
+
+      if (sceneError) {
+        if (sceneError.code === 'PGRST116') {
+          return res.status(404).json({ ok: false, error: 'scene_not_found' });
+        }
+        throw sceneError;
+      }
+
+      if (!scene.animate_with_flow) {
+        return res.status(409).json({
+          ok: false,
+          error: 'scene_not_selected_for_animation',
+        });
+      }
+
+      const storagePath = `${req.params.projectId}/scenes/${scene.scene_number}/animation.${extension}`;
+      const { error: uploadError } = await supabase.storage
+        .from('projects')
+        .upload(storagePath, req.body, {
+          contentType: mimeType,
+          upsert: true,
+          cacheControl: '3600',
+        });
+      if (uploadError) throw uploadError;
+
+      if (scene.animation_url && scene.animation_url !== storagePath) {
+        await supabase.storage.from('projects').remove([scene.animation_url]).catch(() => {});
+      }
+
+      const { error: updateSceneError } = await supabase
+        .from('scenes')
+        .update({
+          animation_url: storagePath,
+          animation_provider: 'google_flow_manual',
+          animation_status: 'ANIMATION_READY',
+        })
+        .eq('id', scene.id);
+      if (updateSceneError) throw updateSceneError;
+
+      await supabase
+        .from('assets')
+        .delete()
+        .eq('scene_id', scene.id)
+        .eq('type', 'animation_final');
+
+      const { error: assetError } = await supabase
+        .from('assets')
+        .insert({
+          project_id: req.params.projectId,
+          scene_id: scene.id,
+          type: 'animation_final',
+          provider: 'google_flow_manual',
+          url: storagePath,
+          metadata: {
+            mime_type: mimeType,
+            bytes: req.body.length,
+            max_flow_animations_per_video: 2,
+          },
+        });
+      if (assetError) throw assetError;
+
+      const { data: selectedScenes, error: selectedError } = await supabase
+        .from('scenes')
+        .select('id,animation_url,animation_status')
+        .eq('project_id', req.params.projectId)
+        .eq('animate_with_flow', true);
+      if (selectedError) throw selectedError;
+
+      const animationsReady = (selectedScenes ?? []).every(
+        (item) => item.animation_url && item.animation_status === 'ANIMATION_READY',
+      );
+
+      const { data: assets, error: assetsError } = await supabase
+        .from('assets')
+        .select('type,url')
+        .eq('project_id', req.params.projectId);
+      if (assetsError) throw assetsError;
+      const voiceReady = (assets ?? []).some((asset) => asset.type === 'voice_final' && asset.url);
+
+      const nextStatus = animationsReady
+        ? (voiceReady ? 'READY_FOR_RENDER' : 'READY_FOR_VOICE')
+        : 'WAITING_FOR_ANIMATIONS';
+
+      const { error: projectError } = await supabase
+        .from('projects')
+        .update({ status: nextStatus, error_message: null })
+        .eq('project_id', req.params.projectId);
+      if (projectError) throw projectError;
+
+      if (animationsReady && voiceReady) {
+        setTimeout(() => {
+          void renderProjectVideo(req.params.projectId).catch((renderError) => {
+            console.error('[render-worker] project failed:', renderError.message);
+          });
+        }, 0);
+      }
+
+      const { data: signed, error: signedError } = await supabase.storage
+        .from('projects')
+        .createSignedUrl(storagePath, 3600);
+
+      return res.status(201).json({
+        ok: true,
+        scene_id: scene.id,
+        status: nextStatus,
+        animation_url: storagePath,
+        animation_preview_url: signedError ? null : signed?.signedUrl ?? null,
+      });
+    } catch (error) {
+      return res.status(500).json({
+        ok: false,
+        error: error.code || 'animation_upload_failed',
+        message: error.message,
+      });
+    }
+  },
+);
 
 
 app.post(
@@ -416,25 +668,47 @@ app.post(
         });
       if (assetError) throw assetError;
 
-      const { data: scenes, error: scenesError } = await supabase
-        .from('scenes')
-        .select('id,status,image_url')
-        .eq('project_id', req.params.projectId);
+      const [{ data: scenes, error: scenesError }, { data: projectState, error: stateError }] =
+        await Promise.all([
+          supabase
+            .from('scenes')
+            .select('id,status,image_url,animate_with_flow,animation_url,animation_status')
+            .eq('project_id', req.params.projectId),
+          supabase
+            .from('projects')
+            .select('animation_selection_confirmed')
+            .eq('project_id', req.params.projectId)
+            .single(),
+        ]);
       if (scenesError) throw scenesError;
+      if (stateError) throw stateError;
 
       const imagesReady = Boolean(
         scenes?.length &&
         scenes.every((scene) => scene.status === 'IMAGE_READY' && scene.image_url),
       );
+      const animationsReady = Boolean(
+        projectState?.animation_selection_confirmed &&
+        (scenes ?? [])
+          .filter((scene) => scene.animate_with_flow)
+          .every((scene) => scene.animation_url && scene.animation_status === 'ANIMATION_READY'),
+      );
 
-      const nextStatus = imagesReady ? 'READY_FOR_RENDER' : 'VOICE_READY_IMAGES_PENDING';
+      const nextStatus = !imagesReady
+        ? 'VOICE_READY_IMAGES_PENDING'
+        : !projectState?.animation_selection_confirmed
+          ? 'VOICE_READY_ANIMATION_SELECTION_PENDING'
+          : !animationsReady
+            ? 'VOICE_READY_ANIMATIONS_PENDING'
+            : 'READY_FOR_RENDER';
+
       const { error: statusError } = await supabase
         .from('projects')
         .update({ status: nextStatus, error_message: null })
         .eq('project_id', req.params.projectId);
       if (statusError) throw statusError;
 
-      if (imagesReady) {
+      if (imagesReady && animationsReady) {
         setTimeout(() => {
           void renderProjectVideo(req.params.projectId).catch((renderError) => {
             console.error('[render-worker] project failed:', renderError.message);
