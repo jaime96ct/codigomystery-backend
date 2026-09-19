@@ -1,5 +1,5 @@
 import express from 'express';
-import { publishToYouTube } from './youtube.js';
+import { publishToYouTube, publishBufferToYouTube } from './youtube.js';
 import { isSupabaseConfigured, requireSupabase } from './supabase.js';
 import { generateProjectImages, signProjectImageUrls, materializeScheduledImages, normalizeSceneImage } from './workers/assets.js';
 import { generateProjectTimeline } from './workers/timeline.js';
@@ -688,6 +688,94 @@ app.post(
     }
   },
 );
+
+
+app.post('/projects/:projectId/publish-youtube', async (req, res) => {
+  if (!backendActionSecret || req.get('x-codigomystery-secret') !== backendActionSecret) {
+    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+
+  try {
+    const supabase = requireSupabase();
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('project_id,status,title,description,tags,final_video_url,video_qa,youtube_video_id')
+      .eq('project_id', req.params.projectId)
+      .single();
+
+    if (projectError) {
+      if (projectError.code === 'PGRST116') {
+        return res.status(404).json({ ok: false, error: 'project_not_found' });
+      }
+      throw projectError;
+    }
+
+    if (project.status !== 'APPROVED') {
+      return res.status(409).json({
+        ok: false,
+        error: 'project_not_approved',
+        status: project.status,
+      });
+    }
+
+    if (!project.video_qa?.passed || !project.final_video_url) {
+      return res.status(409).json({ ok: false, error: 'final_video_not_ready' });
+    }
+
+    if (project.youtube_video_id) {
+      return res.status(409).json({
+        ok: false,
+        error: 'already_published',
+        youtube_video_id: project.youtube_video_id,
+      });
+    }
+
+    const { data: videoFile, error: downloadError } = await supabase.storage
+      .from('projects')
+      .download(project.final_video_url);
+    if (downloadError) throw downloadError;
+
+    const videoBuffer = Buffer.from(await videoFile.arrayBuffer());
+    const publishResult = await publishBufferToYouTube({
+      title: project.title,
+      description: project.description ?? '',
+      tags: project.tags ?? [],
+      videoBuffer,
+      privacyStatus: req.body?.privacy_status || 'private',
+    });
+
+    const { error: updateError } = await supabase
+      .from('projects')
+      .update({
+        status: 'PUBLISHED',
+        youtube_video_id: publishResult.video_id,
+        youtube_url: publishResult.youtube_url,
+        youtube_privacy_status: publishResult.privacy_status,
+        published_at: new Date().toISOString(),
+        error_message: null,
+      })
+      .eq('project_id', project.project_id);
+    if (updateError) throw updateError;
+
+    return res.json({
+      ok: true,
+      project_id: project.project_id,
+      ...publishResult,
+    });
+  } catch (error) {
+    const statusMap = {
+      youtube_not_configured: 503,
+      invalid_title: 400,
+      invalid_video_buffer: 400,
+    };
+    return res.status(statusMap[error.code] || 500).json({
+      ok: false,
+      error: error.code || 'youtube_publish_failed',
+      message: error.message,
+      missing: error.missing ?? null,
+    });
+  }
+});
 
 function parseCallbackData(body) {
   const callbackData = body?.callback_query?.data ?? body?.callback_data ?? body?.data;
