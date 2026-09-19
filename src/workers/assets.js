@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import { requireSupabase } from '../supabase.js';
 import { renderStickmanSvg } from '../renderers/stickmanSvg.js';
 
@@ -5,6 +6,32 @@ async function updateProject(projectId, patch) {
   const supabase = requireSupabase();
   const { error } = await supabase.from('projects').update(patch).eq('project_id', projectId);
   if (error) throw error;
+}
+
+
+export async function normalizeSceneImage(inputBuffer) {
+  const sourceMeta = await sharp(inputBuffer).metadata();
+  const output = await sharp(inputBuffer)
+    .rotate()
+    .resize(1080, 1920, {
+      fit: 'cover',
+      position: 'centre',
+    })
+    .webp({
+      quality: 90,
+      effort: 5,
+    })
+    .toBuffer();
+
+  return {
+    buffer: output,
+    mimeType: 'image/webp',
+    extension: 'webp',
+    width: 1080,
+    height: 1920,
+    sourceWidth: sourceMeta.width ?? null,
+    sourceHeight: sourceMeta.height ?? null,
+  };
 }
 
 export async function generateProjectImages(projectId) {
@@ -173,17 +200,15 @@ export async function materializeScheduledImages(projectId) {
     const source = stagedByScene.get(scene.scene_number);
     if (!source || source.status !== 'READY' || !source.image_base64) continue;
 
-    const mimeType = source.mime_type || 'image/webp';
-    const extension = mimeType === 'image/png' ? 'png'
-      : mimeType === 'image/jpeg' ? 'jpg'
-      : 'webp';
-    const storagePath = `${projectId}/scenes/${scene.scene_number}/image.${extension}`;
-    const bytes = Buffer.from(source.image_base64, 'base64');
+    const stagedMimeType = source.mime_type || 'image/webp';
+    const stagedBytes = Buffer.from(source.image_base64, 'base64');
+    const normalized = await normalizeSceneImage(stagedBytes);
+    const storagePath = `${projectId}/scenes/${scene.scene_number}/image.${normalized.extension}`;
 
     const { error: uploadError } = await supabase.storage
       .from('projects')
-      .upload(storagePath, bytes, {
-        contentType: mimeType,
+      .upload(storagePath, normalized.buffer, {
+        contentType: normalized.mimeType,
         upsert: true,
         cacheControl: '3600',
       });
@@ -215,10 +240,13 @@ export async function materializeScheduledImages(projectId) {
         provider: source.source || 'chatgpt_scheduled',
         url: storagePath,
         metadata: {
-          mime_type: mimeType,
-          width: source.width,
-          height: source.height,
-          bytes: bytes.length,
+          mime_type: normalized.mimeType,
+          width: normalized.width,
+          height: normalized.height,
+          source_mime_type: stagedMimeType,
+          source_width: normalized.sourceWidth ?? source.width,
+          source_height: normalized.sourceHeight ?? source.height,
+          bytes: normalized.buffer.length,
           aspect_ratio: '9:16',
           character_model: 'codigomystery_stickman_v1',
         },
