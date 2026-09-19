@@ -1,7 +1,7 @@
 import express from 'express';
 import { publishToYouTube } from './youtube.js';
 import { isSupabaseConfigured, requireSupabase } from './supabase.js';
-import { generateProjectImages, signProjectImageUrls, materializeScheduledImages } from './workers/assets.js';
+import { generateProjectImages, signProjectImageUrls, materializeScheduledImages, normalizeSceneImage } from './workers/assets.js';
 import { generateProjectTimeline } from './workers/timeline.js';
 import { renderProjectVideo } from './workers/render.js';
 
@@ -214,16 +214,13 @@ app.post(
     try {
       const supabase = requireSupabase();
       const mimeType = req.get('content-type') || '';
-      const extensionMap = {
-        'image/png': 'png',
-        'image/jpeg': 'jpg',
-        'image/webp': 'webp',
-      };
-      const extension = extensionMap[mimeType];
+      const allowedMimeTypes = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
-      if (!extension || !Buffer.isBuffer(req.body) || !req.body.length) {
+      if (!allowedMimeTypes.has(mimeType) || !Buffer.isBuffer(req.body) || !req.body.length) {
         return res.status(400).json({ ok: false, error: 'invalid_image_upload' });
       }
+
+      const normalized = await normalizeSceneImage(req.body);
 
       const { data: scene, error: sceneReadError } = await supabase
         .from('scenes')
@@ -239,11 +236,11 @@ app.post(
         throw sceneReadError;
       }
 
-      const storagePath = `${req.params.projectId}/scenes/${scene.scene_number}/image.${extension}`;
+      const storagePath = `${req.params.projectId}/scenes/${scene.scene_number}/image.${normalized.extension}`;
       const { error: uploadError } = await supabase.storage
         .from('projects')
-        .upload(storagePath, req.body, {
-          contentType: mimeType,
+        .upload(storagePath, normalized.buffer, {
+          contentType: normalized.mimeType,
           upsert: true,
           cacheControl: '3600',
         });
@@ -280,8 +277,13 @@ app.post(
           provider,
           url: storagePath,
           metadata: {
-            mime_type: mimeType,
-            bytes: req.body.length,
+            mime_type: normalized.mimeType,
+            width: normalized.width,
+            height: normalized.height,
+            source_mime_type: mimeType,
+            source_width: normalized.sourceWidth,
+            source_height: normalized.sourceHeight,
+            bytes: normalized.buffer.length,
             aspect_ratio: '9:16',
             character_model: 'codigomystery_stickman_v1',
           },
