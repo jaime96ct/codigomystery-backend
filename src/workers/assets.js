@@ -97,6 +97,7 @@ export async function signProjectImageUrls(project) {
   }));
 
   let voice_preview_url = null;
+  let music_preview_url = null;
   let final_video_preview_url = null;
   const assets = Array.isArray(project.assets) ? project.assets : [];
 
@@ -108,6 +109,14 @@ export async function signProjectImageUrls(project) {
     voice_preview_url = voiceError ? null : voiceSigned?.signedUrl ?? null;
   }
 
+  const musicAsset = assets.find((asset) => asset.type === 'music_final' && asset.url);
+  if (musicAsset?.url) {
+    const { data: musicSigned, error: musicError } = await supabase.storage
+      .from('projects')
+      .createSignedUrl(musicAsset.url, 3600);
+    music_preview_url = musicError ? null : musicSigned?.signedUrl ?? null;
+  }
+
   const finalVideoAsset = assets.find((asset) => asset.type === 'final_video' && asset.url);
   if (finalVideoAsset?.url) {
     const { data: videoSigned, error: videoError } = await supabase.storage
@@ -116,7 +125,13 @@ export async function signProjectImageUrls(project) {
     final_video_preview_url = videoError ? null : videoSigned?.signedUrl ?? null;
   }
 
-  return { ...project, scenes, voice_preview_url, final_video_preview_url };
+  return {
+    ...project,
+    scenes,
+    voice_preview_url,
+    music_preview_url,
+    final_video_preview_url,
+  };
 }
 
 
