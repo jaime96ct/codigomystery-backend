@@ -23,7 +23,7 @@ export async function generateProjectImages(projectId) {
     throw error;
   }
 
-  await updateProject(projectId, { status: 'GENERATING_IMAGES', error_message: null });
+  await updateProject(projectId, { status: 'GENERATING_SVG_PREVIEW', error_message: null });
 
   try {
     await supabase.from('assets').delete().eq('project_id', projectId).eq('type', 'image_svg');
@@ -47,7 +47,7 @@ export async function generateProjectImages(projectId) {
 
       const { error: sceneError } = await supabase
         .from('scenes')
-        .update({ image_url: path, status: 'IMAGE_READY' })
+        .update({ image_url: path, status: 'SVG_PREVIEW_READY', image_provider: 'codigomystery_procedural_preview' })
         .eq('id', scene.id);
       if (sceneError) throw sceneError;
 
@@ -56,8 +56,8 @@ export async function generateProjectImages(projectId) {
         .insert({
           project_id: projectId,
           scene_id: scene.id,
-          type: 'image_svg',
-          provider: 'codigomystery_procedural',
+          type: 'image_svg_preview',
+          provider: 'codigomystery_procedural_preview',
           url: path,
           metadata: {
             width: 1080,
@@ -69,8 +69,8 @@ export async function generateProjectImages(projectId) {
       if (assetError) throw assetError;
     }
 
-    await updateProject(projectId, { status: 'READY_FOR_VOICE' });
-    return { ok: true, status: 'READY_FOR_VOICE', scenes: project.scenes.length };
+    await updateProject(projectId, { status: 'READY_FOR_IMAGES' });
+    return { ok: true, status: 'READY_FOR_IMAGES', scenes: project.scenes.length };
   } catch (error) {
     await updateProject(projectId, {
       status: 'ERROR',
