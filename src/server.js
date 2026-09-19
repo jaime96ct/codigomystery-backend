@@ -323,6 +323,113 @@ app.post('/projects/:projectId/approve-images', async (req, res) => {
   }
 });
 
+
+app.post(
+  '/projects/:projectId/voice',
+  express.raw({
+    type: ['audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/aac', 'audio/ogg'],
+    limit: '30mb',
+  }),
+  async (req, res) => {
+    try {
+      const supabase = requireSupabase();
+      const mimeType = req.get('content-type') || '';
+      const extensionMap = {
+        'audio/mpeg': 'mp3',
+        'audio/wav': 'wav',
+        'audio/x-wav': 'wav',
+        'audio/mp4': 'm4a',
+        'audio/aac': 'aac',
+        'audio/ogg': 'ogg',
+      };
+      const extension = extensionMap[mimeType];
+
+      if (!extension || !Buffer.isBuffer(req.body) || !req.body.length) {
+        return res.status(400).json({ ok: false, error: 'invalid_voice_upload' });
+      }
+
+      const { data: project, error: projectError } = await supabase
+        .from('projects')
+        .select('project_id')
+        .eq('project_id', req.params.projectId)
+        .single();
+      if (projectError) {
+        if (projectError.code === 'PGRST116') {
+          return res.status(404).json({ ok: false, error: 'project_not_found' });
+        }
+        throw projectError;
+      }
+
+      const storagePath = `${req.params.projectId}/voice/voice.${extension}`;
+      const { error: uploadError } = await supabase.storage
+        .from('projects')
+        .upload(storagePath, req.body, {
+          contentType: mimeType,
+          upsert: true,
+          cacheControl: '3600',
+        });
+      if (uploadError) throw uploadError;
+
+      await supabase
+        .from('assets')
+        .delete()
+        .eq('project_id', req.params.projectId)
+        .eq('type', 'voice_final');
+
+      const provider = req.get('x-voice-provider') || 'manual_upload';
+      const { error: assetError } = await supabase
+        .from('assets')
+        .insert({
+          project_id: req.params.projectId,
+          type: 'voice_final',
+          provider,
+          url: storagePath,
+          metadata: {
+            mime_type: mimeType,
+            bytes: req.body.length,
+          },
+        });
+      if (assetError) throw assetError;
+
+      const { data: scenes, error: scenesError } = await supabase
+        .from('scenes')
+        .select('id,status,image_url')
+        .eq('project_id', req.params.projectId);
+      if (scenesError) throw scenesError;
+
+      const imagesReady = Boolean(
+        scenes?.length &&
+        scenes.every((scene) => scene.status === 'IMAGE_READY' && scene.image_url),
+      );
+
+      const nextStatus = imagesReady ? 'READY_FOR_RENDER' : 'VOICE_READY_IMAGES_PENDING';
+      const { error: statusError } = await supabase
+        .from('projects')
+        .update({ status: nextStatus, error_message: null })
+        .eq('project_id', req.params.projectId);
+      if (statusError) throw statusError;
+
+      const { data: signed, error: signedError } = await supabase.storage
+        .from('projects')
+        .createSignedUrl(storagePath, 3600);
+
+      return res.status(201).json({
+        ok: true,
+        project_id: project.project_id,
+        status: nextStatus,
+        voice_url: storagePath,
+        voice_preview_url: signedError ? null : signed?.signedUrl ?? null,
+      });
+    } catch (error) {
+      return res.status(500).json({
+        ok: false,
+        error: error.code || 'voice_upload_failed',
+        message: error.message,
+      });
+    }
+  },
+);
+
 function parseCallbackData(body) {
   const callbackData = body?.callback_query?.data ?? body?.callback_data ?? body?.data;
   if (typeof callbackData !== 'string' || !callbackData.trim()) {
