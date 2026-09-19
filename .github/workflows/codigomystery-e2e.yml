@@ -1,0 +1,96 @@
+name: CodigoMystery E2E test
+
+on:
+  push:
+    paths:
+      - '.github/workflows/codigomystery-e2e.yml'
+  workflow_dispatch:
+
+jobs:
+  generate-test-video:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Create project from slot 1
+        id: create
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -fsS -X POST 'https://codigomystery-backend.onrender.com/projects' \
+            -H 'Content-Type: application/json' \
+            --data '{"format":"Micro-misterio","language":"Español","style":"Stickman CodigoMystery","slot":1}')
+          echo "$RESPONSE" | tee create.json
+          PROJECT_ID=$(echo "$RESPONSE" | jq -r '.project.project_id')
+          test -n "$PROJECT_ID" && test "$PROJECT_ID" != "null"
+          echo "project_id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for staged images to materialize
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_ID='${{ steps.create.outputs.project_id }}'
+          for i in $(seq 1 40); do
+            RESPONSE=$(curl -fsS "https://codigomystery-backend.onrender.com/projects/$PROJECT_ID")
+            READY=$(echo "$RESPONSE" | jq '[.project.scenes[] | select(.status=="IMAGE_READY" and .image_url!=null)] | length')
+            TOTAL=$(echo "$RESPONSE" | jq '.project.scenes | length')
+            echo "images $READY/$TOTAL"
+            if [ "$TOTAL" -gt 0 ] && [ "$READY" -eq "$TOTAL" ]; then exit 0; fi
+            sleep 5
+          done
+          exit 1
+
+      - name: Approve images and skip Flow for technical render test
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_ID='${{ steps.create.outputs.project_id }}'
+          curl -fsS -X POST "https://codigomystery-backend.onrender.com/projects/$PROJECT_ID/approve-images"
+          curl -fsS -X POST "https://codigomystery-backend.onrender.com/projects/$PROJECT_ID/animation-selection" \
+            -H 'Content-Type: application/json' \
+            --data '{"scene_ids":[]}'
+
+      - name: Install local TTS for technical test
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq espeak-ng
+
+      - name: Generate and upload Spanish voice
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_ID='${{ steps.create.outputs.project_id }}'
+          RESPONSE=$(curl -fsS "https://codigomystery-backend.onrender.com/projects/$PROJECT_ID")
+          SCRIPT=$(echo "$RESPONSE" | jq -r '.project.script')
+          espeak-ng -v es -s 165 -w voice.wav "$SCRIPT"
+          curl -fsS -X POST "https://codigomystery-backend.onrender.com/projects/$PROJECT_ID/voice" \
+            -H 'Content-Type: audio/wav' \
+            -H 'x-voice-provider: github_e2e_espeak' \
+            --data-binary @voice.wav
+
+      - name: Wait for final render
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROJECT_ID='${{ steps.create.outputs.project_id }}'
+          for i in $(seq 1 80); do
+            RESPONSE=$(curl -fsS "https://codigomystery-backend.onrender.com/projects/$PROJECT_ID")
+            STATUS=$(echo "$RESPONSE" | jq -r '.project.status')
+            echo "status=$STATUS"
+            if [ "$STATUS" = "READY_FOR_REVIEW" ]; then
+              echo "$RESPONSE" > final-project.json
+              URL=$(echo "$RESPONSE" | jq -r '.project.final_video_preview_url')
+              test -n "$URL" && test "$URL" != "null"
+              curl -LfsS "$URL" -o codigomystery-test.mp4
+              exit 0
+            fi
+            if [ "$STATUS" = "ERROR" ]; then echo "$RESPONSE"; exit 1; fi
+            sleep 5
+          done
+          exit 1
+
+      - name: Upload test video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codigomystery-test-video
+          path: codigomystery-test.mp4
+          retention-days: 3
