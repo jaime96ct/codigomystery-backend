@@ -98,3 +98,129 @@ export async function signProjectImageUrls(project) {
 
   return { ...project, scenes };
 }
+
+
+export async function materializeScheduledImages(projectId) {
+  const supabase = requireSupabase();
+
+  const { data: queueItem, error: queueError } = await supabase
+    .from('content_queue')
+    .select('id')
+    .eq('project_id', projectId)
+    .maybeSingle();
+
+  if (queueError) throw queueError;
+  if (!queueItem) {
+    return { ok: true, materialized: 0, pending: true, reason: 'queue_item_not_found' };
+  }
+
+  const [{ data: staged, error: stagedError }, { data: scenes, error: scenesError }] =
+    await Promise.all([
+      supabase
+        .from('content_queue_images')
+        .select('id,scene_number,status,source,mime_type,width,height,image_base64,error_message')
+        .eq('content_queue_id', queueItem.id)
+        .order('scene_number', { ascending: true }),
+      supabase
+        .from('scenes')
+        .select('id,scene_number,status,image_url')
+        .eq('project_id', projectId)
+        .order('scene_number', { ascending: true }),
+    ]);
+
+  if (stagedError) throw stagedError;
+  if (scenesError) throw scenesError;
+
+  const stagedByScene = new Map((staged ?? []).map((row) => [row.scene_number, row]));
+  let materialized = 0;
+
+  for (const scene of scenes ?? []) {
+    const source = stagedByScene.get(scene.scene_number);
+    if (!source || source.status !== 'READY' || !source.image_base64) continue;
+
+    const mimeType = source.mime_type || 'image/webp';
+    const extension = mimeType === 'image/png' ? 'png'
+      : mimeType === 'image/jpeg' ? 'jpg'
+      : 'webp';
+    const storagePath = `${projectId}/scenes/${scene.scene_number}/image.${extension}`;
+    const bytes = Buffer.from(source.image_base64, 'base64');
+
+    const { error: uploadError } = await supabase.storage
+      .from('projects')
+      .upload(storagePath, bytes, {
+        contentType: mimeType,
+        upsert: true,
+        cacheControl: '3600',
+      });
+    if (uploadError) throw uploadError;
+
+    const { error: sceneUpdateError } = await supabase
+      .from('scenes')
+      .update({
+        image_url: storagePath,
+        status: 'IMAGE_READY',
+        image_provider: source.source || 'chatgpt_scheduled',
+        image_generation_notes: 'Generated ahead of time by the scheduled ChatGPT image task.',
+      })
+      .eq('id', scene.id);
+    if (sceneUpdateError) throw sceneUpdateError;
+
+    await supabase
+      .from('assets')
+      .delete()
+      .eq('scene_id', scene.id)
+      .eq('type', 'image_final');
+
+    const { error: assetError } = await supabase
+      .from('assets')
+      .insert({
+        project_id: projectId,
+        scene_id: scene.id,
+        type: 'image_final',
+        provider: source.source || 'chatgpt_scheduled',
+        url: storagePath,
+        metadata: {
+          mime_type: mimeType,
+          width: source.width,
+          height: source.height,
+          bytes: bytes.length,
+          aspect_ratio: '9:16',
+          character_model: 'codigomystery_stickman_v1',
+        },
+      });
+    if (assetError) throw assetError;
+
+    const { error: stageUpdateError } = await supabase
+      .from('content_queue_images')
+      .update({
+        status: 'MATERIALIZED',
+        image_base64: null,
+        error_message: null,
+      })
+      .eq('id', source.id);
+    if (stageUpdateError) throw stageUpdateError;
+
+    materialized += 1;
+  }
+
+  const { data: refreshedScenes, error: refreshError } = await supabase
+    .from('scenes')
+    .select('id,status,image_url')
+    .eq('project_id', projectId);
+  if (refreshError) throw refreshError;
+
+  const allReady = Boolean(
+    refreshedScenes?.length &&
+    refreshedScenes.every((scene) => scene.status === 'IMAGE_READY' && scene.image_url),
+  );
+
+  const nextStatus = allReady ? 'IMAGES_READY_FOR_REVIEW' : 'READY_FOR_IMAGES';
+  await updateProject(projectId, { status: nextStatus, error_message: null });
+
+  return {
+    ok: true,
+    materialized,
+    total_scenes: refreshedScenes?.length ?? 0,
+    status: nextStatus,
+  };
+}
