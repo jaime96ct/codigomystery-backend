@@ -1,6 +1,8 @@
 import express from 'express';
 import { publishToYouTube } from './youtube.js';
 import { isSupabaseConfigured, requireSupabase } from './supabase.js';
+import { isOpenAIConfigured, openAIModel } from './ai.js';
+import { processProject, startContentWorker } from './workers/content.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -36,6 +38,8 @@ app.get('/health', (_req, res) => {
     youtube_configured: Boolean(process.env.YOUTUBE_CLIENT_ID && process.env.YOUTUBE_CLIENT_SECRET && process.env.YOUTUBE_REFRESH_TOKEN),
     supabase_configured: isSupabaseConfigured,
     database_configured: Boolean(process.env.DATABASE_URL),
+    openai_configured: isOpenAIConfigured,
+    openai_model: isOpenAIConfigured ? openAIModel : null,
     timestamp: new Date().toISOString(),
   });
 });
@@ -90,6 +94,15 @@ app.post('/projects', async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    if (isOpenAIConfigured) {
+      setTimeout(() => {
+        void processProject(projectId).catch((workerError) => {
+          console.error('[content-worker] project failed:', workerError.message);
+        });
+      }, 0);
+    }
+
     return res.status(201).json({ ok: true, project: data });
   } catch (error) {
     return res.status(error.code === 'supabase_not_configured' ? 503 : 500).json({
@@ -268,4 +281,5 @@ app.use((_req, res) => {
 
 app.listen(port, () => {
   console.log(`CodigoMystery backend listening on port ${port}`);
+  startContentWorker();
 });
