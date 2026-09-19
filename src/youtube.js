@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { google } from 'googleapis';
 
 const outputRoot = process.env.CODIGOMYSTERY_OUTPUT_ROOT || '/data/codigomystery/output';
@@ -136,5 +137,64 @@ export async function publishToYouTube({
     youtube_url: `https://www.youtube.com/watch?v=${videoId}`,
     privacy_status: response.data.status?.privacyStatus ?? normalizePrivacyStatus(privacyStatus),
     video_path: resolvedVideoPath,
+  };
+}
+
+
+export async function publishBufferToYouTube({
+  title,
+  description = '',
+  tags = [],
+  videoBuffer,
+  privacyStatus = 'private',
+}) {
+  if (typeof title !== 'string' || !title.trim()) {
+    const error = new Error('title is required');
+    error.code = 'invalid_title';
+    throw error;
+  }
+
+  if (!Buffer.isBuffer(videoBuffer) || !videoBuffer.length) {
+    const error = new Error('videoBuffer is required');
+    error.code = 'invalid_video_buffer';
+    throw error;
+  }
+
+  const youtube = getYouTubeClient();
+  const safeTags = Array.isArray(tags)
+    ? tags.filter((tag) => typeof tag === 'string' && tag.trim()).map((tag) => tag.trim())
+    : [];
+
+  const response = await youtube.videos.insert({
+    part: ['snippet', 'status'],
+    requestBody: {
+      snippet: {
+        title: title.trim().slice(0, 100),
+        description: String(description || '').slice(0, 5000),
+        tags: safeTags,
+        categoryId: defaultCategoryId,
+      },
+      status: {
+        privacyStatus: normalizePrivacyStatus(privacyStatus),
+        selfDeclaredMadeForKids: false,
+      },
+    },
+    media: {
+      body: Readable.from(videoBuffer),
+    },
+  });
+
+  const videoId = response.data.id;
+  if (!videoId) {
+    const error = new Error('YouTube upload completed without video id');
+    error.code = 'youtube_missing_video_id';
+    throw error;
+  }
+
+  return {
+    video_id: videoId,
+    youtube_url: `https://www.youtube.com/watch?v=${videoId}`,
+    privacy_status:
+      response.data.status?.privacyStatus ?? normalizePrivacyStatus(privacyStatus),
   };
 }
