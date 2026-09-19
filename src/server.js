@@ -482,6 +482,128 @@ app.post('/projects/:projectId/render', async (req, res) => {
   }
 });
 
+
+app.patch('/projects/:projectId/metadata', async (req, res) => {
+  try {
+    const supabase = requireSupabase();
+    const body = req.body ?? {};
+    const patch = {};
+
+    if (typeof body.title === 'string') patch.title = body.title.trim().slice(0, 100);
+    if (typeof body.description === 'string') patch.description = body.description.slice(0, 5000);
+    if (Array.isArray(body.tags)) {
+      patch.tags = body.tags
+        .filter((tag) => typeof tag === 'string' && tag.trim())
+        .map((tag) => tag.trim())
+        .slice(0, 30);
+    }
+    if (['REAL', 'INVENTADO', 'INSPIRADO'].includes(body.content_origin)) {
+      patch.content_origin = body.content_origin;
+    }
+
+    if (!Object.keys(patch).length) {
+      return res.status(400).json({ ok: false, error: 'no_valid_metadata_fields' });
+    }
+
+    const { data, error } = await supabase
+      .from('projects')
+      .update(patch)
+      .eq('project_id', req.params.projectId)
+      .select()
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({ ok: false, error: 'project_not_found' });
+      }
+      throw error;
+    }
+
+    return res.json({ ok: true, project: data });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.code || 'metadata_update_failed',
+      message: error.message,
+    });
+  }
+});
+
+app.post('/projects/:projectId/approve-review', async (req, res) => {
+  try {
+    const supabase = requireSupabase();
+    const { data: project, error: readError } = await supabase
+      .from('projects')
+      .select('project_id,status,video_qa,final_video_url')
+      .eq('project_id', req.params.projectId)
+      .single();
+
+    if (readError) {
+      if (readError.code === 'PGRST116') {
+        return res.status(404).json({ ok: false, error: 'project_not_found' });
+      }
+      throw readError;
+    }
+
+    if (project.status !== 'READY_FOR_REVIEW') {
+      return res.status(409).json({
+        ok: false,
+        error: 'project_not_ready_for_review',
+        status: project.status,
+      });
+    }
+
+    if (!project.video_qa?.passed || !project.final_video_url) {
+      return res.status(409).json({ ok: false, error: 'video_qa_not_passed' });
+    }
+
+    const { error } = await supabase
+      .from('projects')
+      .update({
+        status: 'APPROVED',
+        approved_at: new Date().toISOString(),
+        error_message: null,
+      })
+      .eq('project_id', req.params.projectId);
+    if (error) throw error;
+
+    return res.json({ ok: true, status: 'APPROVED' });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.code || 'review_approval_failed',
+      message: error.message,
+    });
+  }
+});
+
+app.post('/projects/:projectId/discard', async (req, res) => {
+  try {
+    const supabase = requireSupabase();
+    const { data, error } = await supabase
+      .from('projects')
+      .update({ status: 'DISCARDED' })
+      .eq('project_id', req.params.projectId)
+      .select('project_id,status')
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({ ok: false, error: 'project_not_found' });
+      }
+      throw error;
+    }
+
+    return res.json({ ok: true, project: data });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.code || 'project_discard_failed',
+      message: error.message,
+    });
+  }
+});
+
 function parseCallbackData(body) {
   const callbackData = body?.callback_query?.data ?? body?.callback_data ?? body?.data;
   if (typeof callbackData !== 'string' || !callbackData.trim()) {
