@@ -212,7 +212,7 @@ async function persistVoiceSyncedTimeline(supabase, projectId, scenes) {
 
 function buildFfmpegArgs({
   scenes,
-  imagePaths,
+  mediaInputs,
   voicePath,
   musicPath,
   subtitlesPath,
@@ -223,7 +223,12 @@ function buildFfmpegArgs({
 
   scenes.forEach((scene, index) => {
     const duration = Math.max(0.5, Number(scene.duration || 1));
-    args.push('-loop', '1', '-t', String(duration), '-i', imagePaths[index]);
+    const input = mediaInputs[index];
+    if (input.type === 'video') {
+      args.push('-stream_loop', '-1', '-i', input.path);
+    } else {
+      args.push('-loop', '1', '-t', String(duration), '-i', input.path);
+    }
   });
 
   const voiceInputIndex = scenes.length;
@@ -235,9 +240,14 @@ function buildFfmpegArgs({
     args.push('-stream_loop', '-1', '-i', musicPath);
   }
 
-  const filters = scenes.map((_, index) =>
-    `[${index}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,zoompan=z='min(zoom+0.00045,1.045)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30,format=yuv420p,setpts=PTS-STARTPTS[v${index}]`,
-  );
+  const filters = scenes.map((scene, index) => {
+    const duration = Math.max(0.5, Number(scene.duration || 1));
+    const input = mediaInputs[index];
+    if (input.type === 'video') {
+      return `[${index}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,trim=duration=${duration},setpts=PTS-STARTPTS,format=yuv420p[v${index}]`;
+    }
+    return `[${index}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,zoompan=z='min(zoom+0.00045,1.045)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30,format=yuv420p,setpts=PTS-STARTPTS[v${index}]`;
+  });
 
   const concatInputs = scenes.map((_, index) => `[v${index}]`).join('');
   filters.push(`${concatInputs}concat=n=${scenes.length}:v=1:a=0[vcat]`);
@@ -284,7 +294,7 @@ export async function renderProjectVideo(projectId) {
 
   const { data: project, error: projectError } = await supabase
     .from('projects')
-    .select('project_id,title,status,scenes(*),assets(*)')
+    .select('project_id,title,status,animation_selection_confirmed,scenes(*),assets(*)')
     .eq('project_id', projectId)
     .single();
 
@@ -310,6 +320,23 @@ export async function renderProjectVideo(projectId) {
     throw error;
   }
 
+  if (!project.animation_selection_confirmed) {
+    const error = new Error('Animation selection has not been confirmed');
+    error.code = 'animation_selection_pending';
+    throw error;
+  }
+
+  const missingAnimations = rawScenes.filter(
+    (scene) => scene.animate_with_flow &&
+      (!scene.animation_url || scene.animation_status !== 'ANIMATION_READY'),
+  );
+  if (missingAnimations.length) {
+    const error = new Error('Selected Flow animations are not ready');
+    error.code = 'animations_not_ready';
+    error.pending_scene_ids = missingAnimations.map((scene) => scene.id);
+    throw error;
+  }
+
   const voiceAsset = (project.assets ?? []).find(
     (asset) => asset.type === 'voice_final' && asset.url,
   );
@@ -330,14 +357,24 @@ export async function renderProjectVideo(projectId) {
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codigomystery-'));
 
   try {
-    const imagePaths = [];
+    const mediaInputs = [];
     for (const scene of rawScenes) {
+      const useAnimation = Boolean(
+        scene.animate_with_flow &&
+        scene.animation_url &&
+        scene.animation_status === 'ANIMATION_READY',
+      );
+      const storagePath = useAnimation ? scene.animation_url : scene.image_url;
       const localPath = path.join(
         workDir,
-        `scene-${String(scene.scene_number).padStart(2, '0')}${extensionFromPath(scene.image_url, '.webp')}`,
+        `scene-${String(scene.scene_number).padStart(2, '0')}${extensionFromPath(storagePath, useAnimation ? '.mp4' : '.webp')}`,
       );
-      await storageDownloadToFile(supabase, scene.image_url, localPath);
-      imagePaths.push(localPath);
+      await storageDownloadToFile(supabase, storagePath, localPath);
+      mediaInputs.push({
+        type: useAnimation ? 'video' : 'image',
+        path: localPath,
+        scene_number: scene.scene_number,
+      });
     }
 
     const voicePath = path.join(
@@ -380,7 +417,7 @@ export async function renderProjectVideo(projectId) {
     try {
       await runFfmpeg(buildFfmpegArgs({
         scenes,
-        imagePaths,
+        mediaInputs,
         voicePath,
         musicPath,
         subtitlesPath,
@@ -392,7 +429,7 @@ export async function renderProjectVideo(projectId) {
       subtitlesBurned = false;
       await runFfmpeg(buildFfmpegArgs({
         scenes,
-        imagePaths,
+        mediaInputs,
         voicePath,
         musicPath,
         subtitlesPath: null,
@@ -439,7 +476,10 @@ export async function renderProjectVideo(projectId) {
           subtitles_burned: subtitlesBurned,
           voice_duration: voiceDuration,
           planned_duration: totalDuration,
-          motion: 'subtle_ken_burns',
+          motion: 'hybrid_flow_plus_ken_burns',
+          flow_animated_scenes: rawScenes
+            .filter((scene) => scene.animate_with_flow && scene.animation_url)
+            .map((scene) => scene.scene_number),
           music_mixed: Boolean(musicPath),
           music_volume: musicPath ? 0.12 : null,
           qa_passed: videoQa.passed,
