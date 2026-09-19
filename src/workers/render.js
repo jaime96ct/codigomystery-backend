@@ -214,6 +214,7 @@ function buildFfmpegArgs({
   scenes,
   imagePaths,
   voicePath,
+  musicPath,
   subtitlesPath,
   outputPath,
   burnSubtitles,
@@ -225,8 +226,14 @@ function buildFfmpegArgs({
     args.push('-loop', '1', '-t', String(duration), '-i', imagePaths[index]);
   });
 
-  const audioInputIndex = scenes.length;
+  const voiceInputIndex = scenes.length;
   args.push('-i', voicePath);
+
+  let musicInputIndex = null;
+  if (musicPath) {
+    musicInputIndex = scenes.length + 1;
+    args.push('-stream_loop', '-1', '-i', musicPath);
+  }
 
   const filters = scenes.map((_, index) =>
     `[${index}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,zoompan=z='min(zoom+0.00045,1.045)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30,format=yuv420p,setpts=PTS-STARTPTS[v${index}]`,
@@ -244,10 +251,20 @@ function buildFfmpegArgs({
     videoLabel = '[vout]';
   }
 
+  let audioMap = `${voiceInputIndex}:a:0`;
+  if (musicInputIndex !== null) {
+    filters.push(
+      `[${voiceInputIndex}:a]volume=1.0[voice]`,
+      `[${musicInputIndex}:a]volume=0.12[music]`,
+      '[voice][music]amix=inputs=2:duration=first:dropout_transition=2[aout]',
+    );
+    audioMap = '[aout]';
+  }
+
   args.push(
     '-filter_complex', filters.join(';'),
     '-map', videoLabel,
-    '-map', `${audioInputIndex}:a:0`,
+    '-map', audioMap,
     '-c:v', 'libx264',
     '-preset', 'veryfast',
     '-crf', '21',
@@ -296,6 +313,9 @@ export async function renderProjectVideo(projectId) {
   const voiceAsset = (project.assets ?? []).find(
     (asset) => asset.type === 'voice_final' && asset.url,
   );
+  const musicAsset = (project.assets ?? []).find(
+    (asset) => asset.type === 'music_final' && asset.url,
+  );
   if (!voiceAsset) {
     const error = new Error('Voice asset is not ready');
     error.code = 'voice_not_ready';
@@ -326,6 +346,15 @@ export async function renderProjectVideo(projectId) {
     );
     await storageDownloadToFile(supabase, voiceAsset.url, voicePath);
 
+    let musicPath = null;
+    if (musicAsset?.url) {
+      musicPath = path.join(
+        workDir,
+        `music${extensionFromPath(musicAsset.url, '.mp3')}`,
+      );
+      await storageDownloadToFile(supabase, musicAsset.url, musicPath);
+    }
+
     const voiceProbe = await probeMedia(voicePath);
     const voiceDuration = Number(
       voiceProbe.format?.duration ||
@@ -353,6 +382,7 @@ export async function renderProjectVideo(projectId) {
         scenes,
         imagePaths,
         voicePath,
+        musicPath,
         subtitlesPath,
         outputPath,
         burnSubtitles: true,
@@ -364,6 +394,7 @@ export async function renderProjectVideo(projectId) {
         scenes,
         imagePaths,
         voicePath,
+        musicPath,
         subtitlesPath: null,
         outputPath,
         burnSubtitles: false,
@@ -409,6 +440,8 @@ export async function renderProjectVideo(projectId) {
           voice_duration: voiceDuration,
           planned_duration: totalDuration,
           motion: 'subtle_ken_burns',
+          music_mixed: Boolean(musicPath),
+          music_volume: musicPath ? 0.12 : null,
           qa_passed: videoQa.passed,
         },
       });
