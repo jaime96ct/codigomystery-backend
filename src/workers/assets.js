@@ -96,7 +96,19 @@ export async function signProjectImageUrls(project) {
     };
   }));
 
-  return { ...project, scenes };
+  let voice_preview_url = null;
+  const voiceAsset = Array.isArray(project.assets)
+    ? project.assets.find((asset) => asset.type === 'voice_final' && asset.url)
+    : null;
+
+  if (voiceAsset?.url) {
+    const { data: voiceSigned, error: voiceError } = await supabase.storage
+      .from('projects')
+      .createSignedUrl(voiceAsset.url, 3600);
+    voice_preview_url = voiceError ? null : voiceSigned?.signedUrl ?? null;
+  }
+
+  return { ...project, scenes, voice_preview_url };
 }
 
 
