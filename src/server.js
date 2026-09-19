@@ -79,12 +79,34 @@ app.get('/content-queue/today', async (_req, res) => {
 
     const { data, error } = await supabase
       .from('content_queue')
-      .select('id,slot,status,title,topic,project_id,created_at,claimed_at')
+      .select('id,slot,status,title,topic,project_id,created_at,claimed_at,scenes')
       .eq('content_date', today)
       .order('slot', { ascending: true });
 
     if (error) throw error;
-    return res.json({ ok: true, content_date: today, items: data ?? [] });
+
+    const ids = (data ?? []).map((item) => item.id);
+    let staged = [];
+    if (ids.length) {
+      const { data: stagedData, error: stagedError } = await supabase
+        .from('content_queue_images')
+        .select('content_queue_id,status')
+        .in('content_queue_id', ids);
+      if (stagedError) throw stagedError;
+      staged = stagedData ?? [];
+    }
+
+    const items = (data ?? []).map(({ scenes, ...item }) => {
+      const imageRows = staged.filter((row) => row.content_queue_id === item.id);
+      return {
+        ...item,
+        scene_count: Array.isArray(scenes) ? scenes.length : 0,
+        images_ready: imageRows.filter((row) => ['READY', 'MATERIALIZED'].includes(row.status)).length,
+        image_errors: imageRows.filter((row) => row.status === 'ERROR').length,
+      };
+    });
+
+    return res.json({ ok: true, content_date: today, items });
   } catch (error) {
     return res.status(error.code === 'supabase_not_configured' ? 503 : 500).json({
       ok: false,
