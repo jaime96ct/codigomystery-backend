@@ -1,8 +1,6 @@
 import express from 'express';
 import { publishToYouTube } from './youtube.js';
 import { isSupabaseConfigured, requireSupabase } from './supabase.js';
-import { isOpenAIConfigured, openAIModel } from './ai.js';
-import { processProject, startContentWorker } from './workers/content.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -38,8 +36,6 @@ app.get('/health', (_req, res) => {
     youtube_configured: Boolean(process.env.YOUTUBE_CLIENT_ID && process.env.YOUTUBE_CLIENT_SECRET && process.env.YOUTUBE_REFRESH_TOKEN),
     supabase_configured: isSupabaseConfigured,
     database_configured: Boolean(process.env.DATABASE_URL),
-    openai_configured: isOpenAIConfigured,
-    openai_model: isOpenAIConfigured ? openAIModel : null,
     timestamp: new Date().toISOString(),
   });
 });
@@ -71,36 +67,55 @@ app.get('/projects', async (_req, res) => {
   }
 });
 
+app.get('/content-queue/today', async (_req, res) => {
+  try {
+    const supabase = requireSupabase();
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Madrid',
+    }).format(new Date());
+
+    const { data, error } = await supabase
+      .from('content_queue')
+      .select('id,slot,status,title,topic,project_id,created_at,claimed_at')
+      .eq('content_date', today)
+      .order('slot', { ascending: true });
+
+    if (error) throw error;
+    return res.json({ ok: true, content_date: today, items: data ?? [] });
+  } catch (error) {
+    return res.status(error.code === 'supabase_not_configured' ? 503 : 500).json({
+      ok: false,
+      error: error.code || 'content_queue_failed',
+      message: error.message,
+    });
+  }
+});
+
 app.post('/projects', async (req, res) => {
   try {
     const supabase = requireSupabase();
     const body = req.body ?? {};
     const projectId = createProjectId();
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Madrid',
+    }).format(new Date());
 
-    const project = {
-      project_id: projectId,
-      status: 'QUEUED',
-      format: body.format || 'Micro-misterio',
-      language: body.language || 'Español',
-      style: body.style || 'Stickman CodigoMystery',
-      title: body.title || null,
-      description: body.description || null,
-    };
-
-    const { data, error } = await supabase
-      .from('projects')
-      .insert(project)
-      .select()
-      .single();
+    const { data, error } = await supabase.rpc('claim_daily_content', {
+      p_project_id: projectId,
+      p_content_date: today,
+      p_format: body.format || 'Micro-misterio',
+      p_language: body.language || 'Español',
+      p_style: body.style || 'Stickman CodigoMystery',
+    });
 
     if (error) throw error;
 
-    if (isOpenAIConfigured) {
-      setTimeout(() => {
-        void processProject(projectId).catch((workerError) => {
-          console.error('[content-worker] project failed:', workerError.message);
-        });
-      }, 0);
+    if (!data) {
+      return res.status(409).json({
+        ok: false,
+        error: 'no_prepared_content_today',
+        message: 'No hay contenido preparado disponible para hoy.',
+      });
     }
 
     return res.status(201).json({ ok: true, project: data });
@@ -281,5 +296,4 @@ app.use((_req, res) => {
 
 app.listen(port, () => {
   console.log(`CodigoMystery backend listening on port ${port}`);
-  startContentWorker();
 });
