@@ -125,13 +125,26 @@ app.post('/projects', async (req, res) => {
       timeZone: 'Europe/Madrid',
     }).format(new Date());
 
-    const { data, error } = await supabase.rpc('claim_daily_content', {
-      p_project_id: projectId,
-      p_content_date: today,
-      p_format: body.format || 'Micro-misterio',
-      p_language: body.language || 'Español',
-      p_style: body.style || 'Stickman CodigoMystery',
-    });
+    const requestedSlot = Number.isInteger(Number(body.slot)) ? Number(body.slot) : null;
+    const rpcName = requestedSlot ? 'claim_daily_content_slot' : 'claim_daily_content';
+    const rpcArgs = requestedSlot
+      ? {
+          p_project_id: projectId,
+          p_content_date: today,
+          p_slot: requestedSlot,
+          p_format: body.format || 'Micro-misterio',
+          p_language: body.language || 'Español',
+          p_style: body.style || 'Stickman CodigoMystery',
+        }
+      : {
+          p_project_id: projectId,
+          p_content_date: today,
+          p_format: body.format || 'Micro-misterio',
+          p_language: body.language || 'Español',
+          p_style: body.style || 'Stickman CodigoMystery',
+        };
+
+    const { data, error } = await supabase.rpc(rpcName, rpcArgs);
 
     if (error) throw error;
 
@@ -139,7 +152,9 @@ app.post('/projects', async (req, res) => {
       return res.status(409).json({
         ok: false,
         error: 'no_prepared_content_today',
-        message: 'No hay contenido preparado disponible para hoy.',
+        message: requestedSlot
+          ? `El slot ${requestedSlot} no está disponible para crear vídeo.`
+          : 'No hay contenido preparado disponible para hoy.',
       });
     }
 
