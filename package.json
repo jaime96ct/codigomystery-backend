@@ -16,6 +16,7 @@
     "express": "^5.1.0",
     "googleapis": "^144.0.0",
     "pg": "^8.16.3",
-    "ffmpeg-static": "^5.2.0"
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0"
   }
 }
