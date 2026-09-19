@@ -112,14 +112,27 @@ export async function signProjectImageUrls(project) {
   if (!project?.scenes?.length) return project;
 
   const scenes = await Promise.all(project.scenes.map(async (scene) => {
-    if (!scene.image_url) return scene;
-    const { data, error } = await supabase.storage
-      .from('projects')
-      .createSignedUrl(scene.image_url, 3600);
+    let image_preview_url = null;
+    let animation_preview_url = null;
+
+    if (scene.image_url) {
+      const { data, error } = await supabase.storage
+        .from('projects')
+        .createSignedUrl(scene.image_url, 3600);
+      image_preview_url = error ? null : data?.signedUrl ?? null;
+    }
+
+    if (scene.animation_url) {
+      const { data, error } = await supabase.storage
+        .from('projects')
+        .createSignedUrl(scene.animation_url, 3600);
+      animation_preview_url = error ? null : data?.signedUrl ?? null;
+    }
 
     return {
       ...scene,
-      image_preview_url: error ? null : data?.signedUrl ?? null,
+      image_preview_url,
+      animation_preview_url,
     };
   }));
 
