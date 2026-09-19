@@ -1,6 +1,6 @@
 import express from 'express';
 import { publishToYouTube } from './youtube.js';
-import { isSupabaseConfigured } from './supabase.js';
+import { isSupabaseConfigured, requireSupabase } from './supabase.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -10,6 +10,23 @@ const n8nActionSecret = process.env.N8N_ACTION_SECRET || '';
 const backendActionSecret = process.env.BACKEND_ACTION_SECRET || '';
 
 app.use(express.json({ limit: '1mb' }));
+
+const allowedOrigins = new Set([
+  process.env.FRONTEND_ORIGIN || 'https://codigomystery-web.jaime96ct.workers.dev',
+  'http://localhost:5173',
+]);
+
+app.use((req, res, next) => {
+  const origin = req.get('origin');
+  if (origin && allowedOrigins.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-codigomystery-secret');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -21,6 +38,92 @@ app.get('/health', (_req, res) => {
     database_configured: Boolean(process.env.DATABASE_URL),
     timestamp: new Date().toISOString(),
   });
+});
+
+function createProjectId() {
+  const now = new Date();
+  const date = now.toISOString().slice(0, 10);
+  const suffix = String(Date.now()).slice(-6);
+  return `CM-${date}-${suffix}`;
+}
+
+app.get('/projects', async (_req, res) => {
+  try {
+    const supabase = requireSupabase();
+    const { data, error } = await supabase
+      .from('projects')
+      .select('project_id,status,format,language,title,style,created_at,updated_at')
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (error) throw error;
+    return res.json({ ok: true, projects: data ?? [] });
+  } catch (error) {
+    return res.status(error.code === 'supabase_not_configured' ? 503 : 500).json({
+      ok: false,
+      error: error.code || 'projects_list_failed',
+      message: error.message,
+    });
+  }
+});
+
+app.post('/projects', async (req, res) => {
+  try {
+    const supabase = requireSupabase();
+    const body = req.body ?? {};
+    const projectId = createProjectId();
+
+    const project = {
+      project_id: projectId,
+      status: 'QUEUED',
+      format: body.format || 'Micro-misterio',
+      language: body.language || 'Español',
+      style: body.style || 'Stickman CodigoMystery',
+      title: body.title || null,
+      description: body.description || null,
+    };
+
+    const { data, error } = await supabase
+      .from('projects')
+      .insert(project)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return res.status(201).json({ ok: true, project: data });
+  } catch (error) {
+    return res.status(error.code === 'supabase_not_configured' ? 503 : 500).json({
+      ok: false,
+      error: error.code || 'project_create_failed',
+      message: error.message,
+    });
+  }
+});
+
+app.get('/projects/:projectId', async (req, res) => {
+  try {
+    const supabase = requireSupabase();
+    const { data, error } = await supabase
+      .from('projects')
+      .select('*, scenes(*), jobs(*), assets(*)')
+      .eq('project_id', req.params.projectId)
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({ ok: false, error: 'project_not_found' });
+      }
+      throw error;
+    }
+
+    return res.json({ ok: true, project: data });
+  } catch (error) {
+    return res.status(error.code === 'supabase_not_configured' ? 503 : 500).json({
+      ok: false,
+      error: error.code || 'project_read_failed',
+      message: error.message,
+    });
+  }
 });
 
 function parseCallbackData(body) {
