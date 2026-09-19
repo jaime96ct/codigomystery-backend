@@ -97,10 +97,10 @@ export async function signProjectImageUrls(project) {
   }));
 
   let voice_preview_url = null;
-  const voiceAsset = Array.isArray(project.assets)
-    ? project.assets.find((asset) => asset.type === 'voice_final' && asset.url)
-    : null;
+  let final_video_preview_url = null;
+  const assets = Array.isArray(project.assets) ? project.assets : [];
 
+  const voiceAsset = assets.find((asset) => asset.type === 'voice_final' && asset.url);
   if (voiceAsset?.url) {
     const { data: voiceSigned, error: voiceError } = await supabase.storage
       .from('projects')
@@ -108,7 +108,15 @@ export async function signProjectImageUrls(project) {
     voice_preview_url = voiceError ? null : voiceSigned?.signedUrl ?? null;
   }
 
-  return { ...project, scenes, voice_preview_url };
+  const finalVideoAsset = assets.find((asset) => asset.type === 'final_video' && asset.url);
+  if (finalVideoAsset?.url) {
+    const { data: videoSigned, error: videoError } = await supabase.storage
+      .from('projects')
+      .createSignedUrl(finalVideoAsset.url, 3600);
+    final_video_preview_url = videoError ? null : videoSigned?.signedUrl ?? null;
+  }
+
+  return { ...project, scenes, voice_preview_url, final_video_preview_url };
 }
 
 
