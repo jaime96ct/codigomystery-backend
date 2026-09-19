@@ -210,61 +210,98 @@ async function persistVoiceSyncedTimeline(supabase, projectId, scenes) {
   return { storagePath, srt, totalDuration };
 }
 
-function buildFfmpegArgs({
-  scenes,
-  mediaInputs,
+async function renderSceneClip({ scene, input, outputPath }) {
+  const duration = Math.max(0.5, Number(scene.duration || 1));
+  const args = ['-y'];
+
+  if (input.type === 'video') {
+    args.push(
+      '-stream_loop', '-1',
+      '-i', input.path,
+      '-t', String(duration),
+      '-vf',
+      `scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,fps=30,trim=duration=${duration},setpts=PTS-STARTPTS,format=yuv420p`,
+    );
+  } else {
+    args.push(
+      '-loop', '1',
+      '-framerate', '30',
+      '-t', String(duration),
+      '-i', input.path,
+      '-vf',
+      "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,zoompan=z='min(zoom+0.00055,1.045)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=720x1280:fps=30,format=yuv420p,setpts=PTS-STARTPTS",
+    );
+  }
+
+  args.push(
+    '-an',
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-crf', '20',
+    '-pix_fmt', 'yuv420p',
+    '-r', '30',
+    '-movflags', '+faststart',
+    outputPath,
+  );
+
+  await runFfmpeg(args);
+}
+
+async function concatSceneClips(sceneClips, workDir) {
+  const listPath = path.join(workDir, 'scene-clips.txt');
+  const concatPath = path.join(workDir, 'visual-track.mp4');
+  const list = sceneClips
+    .map((clipPath) => `file '${clipPath.replaceAll("'", "'\\''")}'`)
+    .join('\n');
+
+  await fs.writeFile(listPath, list, 'utf8');
+  await runFfmpeg([
+    '-y',
+    '-f', 'concat',
+    '-safe', '0',
+    '-i', listPath,
+    '-c', 'copy',
+    '-movflags', '+faststart',
+    concatPath,
+  ]);
+
+  return concatPath;
+}
+
+function buildFinalMixArgs({
+  visualTrackPath,
   voicePath,
   musicPath,
   subtitlesPath,
   outputPath,
   burnSubtitles,
 }) {
-  const args = ['-y'];
-
-  scenes.forEach((scene, index) => {
-    const duration = Math.max(0.5, Number(scene.duration || 1));
-    const input = mediaInputs[index];
-    if (input.type === 'video') {
-      args.push('-stream_loop', '-1', '-i', input.path);
-    } else {
-      args.push('-loop', '1', '-framerate', '30', '-t', String(duration), '-i', input.path);
-    }
-  });
-
-  const voiceInputIndex = scenes.length;
-  args.push('-i', voicePath);
-
+  const args = ['-y', '-i', visualTrackPath, '-i', voicePath];
   let musicInputIndex = null;
+
   if (musicPath) {
-    musicInputIndex = scenes.length + 1;
+    musicInputIndex = 2;
     args.push('-stream_loop', '-1', '-i', musicPath);
   }
 
-  const filters = scenes.map((scene, index) => {
-    const duration = Math.max(0.5, Number(scene.duration || 1));
-    const input = mediaInputs[index];
-    if (input.type === 'video') {
-      return `[${index}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,trim=duration=${duration},setpts=PTS-STARTPTS,format=yuv420p[v${index}]`;
-    }
-    return `[${index}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,zoompan=z='min(zoom+0.00045,1.045)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30,format=yuv420p,setpts=PTS-STARTPTS[v${index}]`;
-  });
+  const filters = [];
+  let videoLabel = '[vbase]';
+  filters.push(
+    '[0:v]scale=1080:1920:flags=lanczos,fps=30,format=yuv420p[vbase]',
+  );
 
-  const concatInputs = scenes.map((_, index) => `[v${index}]`).join('');
-  filters.push(`${concatInputs}concat=n=${scenes.length}:v=1:a=0[vcat]`);
-
-  let videoLabel = '[vcat]';
   if (burnSubtitles && subtitlesPath) {
-    const escaped = subtitlesPath.replaceAll('\\', '/').replaceAll("'", "\\'");
+    const escaped = subtitlesPath.replaceAll('\\\\', '/').replaceAll("'", "\\'");
     filters.push(
-      `[vcat]subtitles='${escaped}':force_style='FontSize=28,Alignment=2,MarginV=155,Outline=3,Shadow=0,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010'[vout]`,
+      `[vbase]subtitles='${escaped}':force_style='FontSize=28,Alignment=2,MarginV=155,Outline=3,Shadow=0,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010'[vout]`,
     );
     videoLabel = '[vout]';
   }
 
-  let audioMap = `${voiceInputIndex}:a:0`;
+  let audioMap = '1:a:0';
   if (musicInputIndex !== null) {
     filters.push(
-      `[${voiceInputIndex}:a]volume=1.0[voice]`,
+      '[1:a]volume=1.0[voice]',
       `[${musicInputIndex}:a]volume=0.12[music]`,
       '[voice][music]amix=inputs=2:duration=first:dropout_transition=2[aout]',
     );
@@ -280,7 +317,7 @@ function buildFfmpegArgs({
     '-crf', '20',
     '-pix_fmt', 'yuv420p',
     '-c:a', 'aac',
-    '-b:a', '192k',
+    '-b:a', '160k',
     '-shortest',
     '-movflags', '+faststart',
     outputPath,
@@ -411,13 +448,27 @@ export async function renderProjectVideo(projectId) {
     const subtitlesPath = path.join(workDir, 'subtitles.srt');
     await fs.writeFile(subtitlesPath, srt, 'utf8');
 
+    const sceneClips = [];
+    for (let index = 0; index < scenes.length; index += 1) {
+      const clipPath = path.join(
+        workDir,
+        `rendered-scene-${String(index + 1).padStart(2, '0')}.mp4`,
+      );
+      await renderSceneClip({
+        scene: scenes[index],
+        input: mediaInputs[index],
+        outputPath: clipPath,
+      });
+      sceneClips.push(clipPath);
+    }
+
+    const visualTrackPath = await concatSceneClips(sceneClips, workDir);
     const outputPath = path.join(workDir, 'final.mp4');
     let subtitlesBurned = true;
 
     try {
-      await runFfmpeg(buildFfmpegArgs({
-        scenes,
-        mediaInputs,
+      await runFfmpeg(buildFinalMixArgs({
+        visualTrackPath,
         voicePath,
         musicPath,
         subtitlesPath,
@@ -427,9 +478,8 @@ export async function renderProjectVideo(projectId) {
     } catch (error) {
       console.warn('[render-worker] subtitle burn-in failed; retrying without burned subtitles');
       subtitlesBurned = false;
-      await runFfmpeg(buildFfmpegArgs({
-        scenes,
-        mediaInputs,
+      await runFfmpeg(buildFinalMixArgs({
+        visualTrackPath,
         voicePath,
         musicPath,
         subtitlesPath: null,
